@@ -1,0 +1,9 @@
+# VIM editor
+*.swp
+
+# Output files
+nmap-output
+ldap-dump
+
+# Output folders
+smb_loot/
