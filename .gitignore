@@ -7,3 +7,4 @@ ldap-dump
 
 # Output folders
 smb_loot/
+ftp_loot/

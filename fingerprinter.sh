@@ -15,6 +15,11 @@ declare -r endColour="\033[0m\e[0m"
 declare -r nmap_file="nmap-output"
 declare -r ldap_file="ldap-dump"
 declare -r smb_folder="smb_loot"
+declare -r ftp_folder="ftp_loot"
+
+declare -i download_files=0
+
+declare -i nmap_pid
 
 declare -a tcp_ports=()
 declare -a domains=()
@@ -29,11 +34,12 @@ declare password=""
 function help {
     echo -e "\n${yellowColour}Usage: $0 [options] target
     Required arguments:
-	target			Address of the target to scan
+	target			    Address of the target to scan
     Optional arguments:
-	-d, --domain		Domain name
-	-u, --username		Username (Default blank)
-	-p, --password		Password (Default blank)
+	-d, --domain		    Domain name
+	-u, --username		    Username (Default: blank)
+	-p, --password		    Password (Default: blank)
+	-f, --download-files	    Download files from target (Default: no)
     ${endColour}"
     exit 1
 }
@@ -48,7 +54,7 @@ function check_dependencies {
     declare -a missing=()
 
     for dependency in $*; do
-	if [[ -z $(which $dependency) ]] >/dev/null 2>&1; then
+	if [[ -z $(which $dependency) ]] > /dev/null 2>&1; then
 	    missing+=($dependency)
 	fi
     done
@@ -82,9 +88,9 @@ function nmap_scan {
     echo -e "\n${blueColour}Scanning ports...${endColour}"
     declare ports=$(nmap -Pn --min-rate=5000 -p- $target | grep -iP '\d{0,5}/tcp' | tee /dev/tty)
     tcp_ports+=$(echo "$ports" | grep open | cut -d/ -f1 | xargs)
-    echo -e "\n${turquoiseColour}Nmap complet scan in progress, check the results in the file '$nmap_file'...${endColour}"
-    nmap -Pn -sV --script "default or (vuln and safe)" -p$(echo ${tcp_ports[*]} | tr ' ' ',') -oN $nmap_file $target > /dev/null 2>&1
-    parse_nmap_results
+    echo -e "\n${turquoiseColour}Nmap complete scan in background, check the results in the file '$nmap_file'...${endColour}"
+    nmap -Pn -sV --script "default or (vuln and safe)" -p$(echo ${tcp_ports[*]} | tr ' ' ',') -oN $nmap_file $target > /dev/null 2>&1 &
+    nmap_pid=$!
 }
 
 function parse_nmap_results {
@@ -100,13 +106,36 @@ function parse_nmap_results {
 }
 
 function scan_ports {
-    declare ports=${tcp_ports[*]}
+    declare ports=" ${tcp_ports[*]} "
 
-    if (echo $ports | grep -E '53' > /dev/null); then scan_dns; fi
-    if (echo $ports | grep -E '80|443' > /dev/null); then scan_http; fi
-    if (echo $ports | grep -E '135|593' > /dev/null); then scan_msrpc; fi
-    if (echo $ports | grep -E '139|445' > /dev/null); then scan_smb; fi
-    if (echo $ports | grep -E '389|636|3268|3269' > /dev/null); then scan_ldap; fi
+    if (echo "$ports" | grep -P ' (21) ' > /dev/null); then scan_ftp; fi
+    if (echo "$ports" | grep -P ' (80|443) ' > /dev/null); then scan_http; fi
+    if (echo "$ports" | grep -P ' (135|593) ' > /dev/null); then scan_msrpc; fi
+    if (echo "$ports" | grep -P ' (139|445) ' > /dev/null); then scan_smb; fi
+
+    echo -e "\n${turquoiseColour}Waiting for complete nmap scan to finish...${endColour}"; wait $nmap_pid
+    cat $nmap_file; unset nmap_pid
+    parse_nmap_results
+
+    if (echo "$ports" | grep -P ' (53) ' > /dev/null); then scan_dns; fi
+    if (echo "$ports" | grep -P ' (389|636|3268|3269) ' > /dev/null); then scan_ldap; fi
+}
+
+function scan_ftp {
+    echo -e "\n${blueColour}Scanning FTP service...${endColour}"
+    if (check_dependencies ftp wget); then
+	declare credentials="$([[ -n $username ]] && echo $username || echo 'anonymous') $([[ -n $password ]] && echo $password || echo 'anonymous')"
+	declare output=$(echo -e "user $credentials" | ftp -n $target)
+	if [[ -z $output ]]; then
+	    echo -e "user $credentials \nls" | ftp -n $target
+	    if [[ $download_files -gt 0 ]]; then
+		echo -e "${turquoiseColour}Downloading files to folder '$ftp_folder'...${endColour}"
+		wget -m -P $ftp_folder ftp://$target --user "$(echo $credentials | cut -d' ' -f1)" --password "$(echo $credentials | cut -d' ' -f2)" 2>/dev/null
+	    fi
+	else
+	    echo -e "${yellowColour}Cannot connect to FTP with the credentials '$credentials'${endColour}"
+	fi
+    fi
 }
 
 function scan_dns {
@@ -120,7 +149,7 @@ function scan_dns {
 }
 
 function scan_http {
-    echo -e "\n${blueColour}Scanning HTTP...${endColour}"
+    echo -e "\n${blueColour}Scanning HTTP service...${endColour}"
     if (check_dependencies whatweb); then
 	whatweb -a 3 $target
     fi
@@ -130,7 +159,7 @@ function scan_http {
 }
 
 function scan_msrpc {
-    echo -e "\n${blueColour}Scanning MSRPC...${endColour}"
+    echo -e "\n${blueColour}Scanning MSRPC service...${endColour}"
     if (check_dependencies rpcclient); then
 	declare rid=""
 	declare output=""
@@ -171,12 +200,12 @@ function scan_msrpc {
 }
 
 function scan_smb {
-    echo -e "\n${blueColour}Scanning SMB...${endColour}"
+    echo -e "\n${blueColour}Scanning SMB service...${endColour}"
     if (check_dependencies crackmapexec smbclient); then
 	declare output=$(crackmapexec smb $target -u "$username" -p "$password" --shares 2>/dev/null | grep -iv 'KTHXBYE' | \
 	    sed -r "s/[[:cntrl:]]\[[0-9]{1,3}m//g" | tee /dev/tty)
 
-	if (echo $output | grep -i 'Enumerating shares' > /dev/null); then
+	if (echo $output | grep -i 'Enumerating shares' > /dev/null && [[ $download_files -gt 0 ]]); then
 	    mkdir -p $smb_folder
 	    echo -en "\n${turquoiseColour}Downloading SMB shares to folder '$smb_folder':${endColour}"
 	    echo "$output" | tail +5 | grep READ | awk '{print $4}' | while read share; do
@@ -190,8 +219,9 @@ function scan_smb {
 }
 
 function scan_ldap {
-    echo -e "\n${blueColour}Scanning LDAP...${endColour}"
+    echo -e "\n${blueColour}Scanning LDAP service...${endColour}"
     if (check_dependencies ldapsearch); then
+	cat /dev/null > $ldap_file
 	for domain in ${domains[*]}; do
 	    ldapsearch -x -h $target -D "$username" -w "$password" -b "$(echo $domain | awk -F. '{print "DC="$1",DC="$2}')" >> $ldap_file
 	    echo -e "\n" >> $ldap_file
@@ -213,13 +243,14 @@ while [[ $# -gt 0 ]]; do
 	-d|--domain) domains+=($2); shift 2;;
 	-u|--username) username=$2; shift 2;;
 	-p|--password) password=$2; shift 2;;
+	-f|--download-files) download_files=1; shift;;
 	*) params="$params $1"; counter+=1; shift;;
     esac
 done
 
 if [[ $counter -lt 1 ]]; then help; fi;
 unset counter; eval set -- "$params"
-declare target=$1
+target=$1
 
 
 # Main program
@@ -236,6 +267,6 @@ check_os
 nmap_scan
 scan_ports
 
-wait; echo -e "\n${blueColour}Waiting for all the child processes...${endColour}"
+echo -e "\n${blueColour}Waiting for all the child processes...${endColour}"; wait
 echo -e "\n${greenColour}Enjoy the results ;)${endColour}\n"
 tput cnorm
