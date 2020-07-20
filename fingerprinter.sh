@@ -14,6 +14,7 @@ declare -r endColour="\033[0m\e[0m"
 # Global variables
 declare -r nmap_file="nmap-output"
 declare -r ldap_file="ldap-dump"
+declare -r users_file="users.txt"
 declare -r smb_folder="smb_loot"
 declare -r ftp_folder="ftp_loot"
 
@@ -46,7 +47,7 @@ function help {
 
 function control_c {
     tput cnorm
-    echo -e "${yellowColour}Exiting...${endColour}"
+    echo -e "${yellowColour}Exiting...${endColour}\n"
     exit 0
 }
 
@@ -67,12 +68,38 @@ function check_dependencies {
     fi
 }
 
+function check_existing_files {
+    declare -a existing=()
+
+    for file in $nmap_file $ldap_file $users_file; do
+	if [[ -e $file ]]; then existing+=($file); fi
+    done
+
+    for dir in $smb_folder $ftp_folder; do
+	if [[ -d $dir ]]; then existing+=($dir); fi
+    done
+
+    if [[ ${#existing[*]} -gt 0 ]]; then
+	echo -e "${yellowColour}[!] The following files or folders already exists: ${existing[*]}${endColour}"
+	return 1
+    else
+	return 0
+    fi
+}
+
+function delete_existing_files {
+    rm -f $nmap_file $ldap_file $users_file
+    rm -rf $smb_folder $ftp_folder
+}
+
 function check_os {
-    declare -i ttl
+    declare -i ttl=0
     echo -e "\n${blueColour}Operative System according to the TTL...${endColour}"
     ttl=$(ping -c1 $target | grep -ioP 'ttl=\d{2,3}' | cut -d= -f2)
     echo -en "TTL=$ttl -> "
-    if [[ $ttl -le 64 ]]; then
+    if [[ $ttl -eq 0 ]]; then
+	echo -e "${yellowColour}No PING received. Could the target be down?${endColour}"
+    elif [[ $ttl -le 64 ]]; then
 	echo "Linux/Unix"
     elif [[ $ttl -le 128 ]]; then
 	echo "Windows"
@@ -87,17 +114,30 @@ function check_os {
 function nmap_scan {
     echo -e "\n${blueColour}Scanning ports...${endColour}"
     declare ports=$(nmap -Pn --min-rate=5000 -p- $target | grep -iP '\d{0,5}/tcp' | tee /dev/tty)
-    tcp_ports+=$(echo "$ports" | grep open | cut -d/ -f1 | xargs)
-    echo -e "\n${turquoiseColour}Nmap complete scan in background, check the results in the file '$nmap_file'...${endColour}"
-    nmap -Pn -sV --script "default or (vuln and safe)" -p$(echo ${tcp_ports[*]} | tr ' ' ',') -oN $nmap_file $target > /dev/null 2>&1 &
-    nmap_pid=$!
+    tcp_ports+=($(echo "$ports" | grep open | cut -d/ -f1 | xargs))
+    
+    if [[ ${#tcp_ports[*]} -gt 0 ]]; then
+	echo -e "\n${turquoiseColour}Nmap complete scan in background, check the results in the file '$nmap_file'...${endColour}"
+	nmap -Pn -sV --script "default or (vuln and safe)" -p$(echo "${tcp_ports[*]}" | tr ' ' ',') -oN $nmap_file $target > /dev/null 2>&1 &
+	nmap_pid=$!
+	return 0
+    else
+	echo -e "${redColour}[!] No open ports!${endColour}"; return 1
+    fi
 }
 
 function parse_nmap_results {
+    if [[ $nmap_pid ]]; then
+	echo -e "\n${blueColour}Waiting for complete nmap scan to finish...${endColour}"; wait $nmap_pid; unset nmap_pid
+    fi; cat $nmap_file;
+
     domains+=($(grep -ioP '(commonName|Domain)[=:]\s*\w+\.\w+' $nmap_file | \
 	while read line; do echo $line | awk -F'[=:]' '{print $NF}'; done | tr -d '[:blank:]' | sort -u | xargs))
+    domains=($(echo "${domains[*]}" | tr ' ' '\n' | sort -u | xargs))
+}
 
-    echo -e "\n${turquoiseColour}Domain names found:${endColour}"
+function print_domains {
+    echo -e "\n${blueColour}Domain names found:${endColour}"
     if [[ ${#domains[*]} -gt 0 ]]; then
 	echo "${domains[*]}" | tr ' ' '\n'
     else
@@ -108,17 +148,15 @@ function parse_nmap_results {
 function scan_ports {
     declare ports=" ${tcp_ports[*]} "
 
-    if (echo "$ports" | grep -P ' (21) ' > /dev/null); then scan_ftp; fi
-    if (echo "$ports" | grep -P ' (80|443) ' > /dev/null); then scan_http; fi
     if (echo "$ports" | grep -P ' (135|593) ' > /dev/null); then scan_msrpc; fi
     if (echo "$ports" | grep -P ' (139|445) ' > /dev/null); then scan_smb; fi
-
-    echo -e "\n${turquoiseColour}Waiting for complete nmap scan to finish...${endColour}"; wait $nmap_pid
-    cat $nmap_file; unset nmap_pid
-    parse_nmap_results
-
+    if (echo "$ports" | grep -P ' (80|443) ' > /dev/null); then scan_http; fi
+    if (echo "$ports" | grep -P ' (21) ' > /dev/null); then scan_ftp; fi
+    
+    if [[ ${#domains[*]} -eq 0 ]]; then parse_nmap_results; fi
     if (echo "$ports" | grep -P ' (53) ' > /dev/null); then scan_dns; fi
     if (echo "$ports" | grep -P ' (389|636|3268|3269) ' > /dev/null); then scan_ldap; fi
+    if (echo "$ports" | grep -P ' (88) ' > /dev/null); then scan_kerberos; fi
 }
 
 function scan_ftp {
@@ -169,6 +207,8 @@ function scan_msrpc {
 	output=$(rpcclient -U '' -N $target -c 'enumdomusers' 2>/dev/null)
 	if [[ $? -eq 0 ]]; then
 	    users+=($(echo $output | grep -ioP '\[.*?\]' | grep -iv '0x' | tr -d '[]' | xargs))
+	    users=($(echo ${users[*]} | tr ' ' '\n' | sort -u | xargs))
+	    echo "${users[*]}" | tr ' ' '\n' > $users_file
 	    
 	    echo "Users with description:"
 	    for user in ${users[*]}; do
@@ -232,6 +272,21 @@ function scan_ldap {
     fi
 }
 
+function scan_kerberos {
+    echo -e "\n${blueColour}Scanning Kerberous...${endColour}"
+    if (check_dependencies GetNPUsers.py); then
+	declare credentials="$username"; if [[ -n $password ]]; then credentials="$credentials:$password"; fi
+
+	for domain in ${domains[*]}; do
+	    if [[ -e $users_file ]]; then
+		GetNPUsers.py -request -usersfile $users_file -dc-ip $target $domain/$credentials | tail -n +3 | grep -v '\[-\]'
+	    else 
+		GetNPUsers.py -dc-ip $target $domain/$credentials | tail -n +3 | grep -av '[\[-\]]'
+	    fi
+	done
+    fi
+}
+
 
 # Arguments parser
 declare -i counter=0
@@ -258,14 +313,28 @@ tput civis
 trap control_c SIGINT
 
 if (! check_dependencies nmap); then
-    echo -e "${redColour}[!] Nmap is needed. Please, install it to continue!${endColour}"
-    tput cnorm
-    exit 1
+    echo -e "${redColour}[!] Nmap is needed. Please, install it to continue!${endColour}\n"
+    tput cnorm; exit 1
+fi
+
+if (! check_existing_files); then
+    declare answer=""; tput cnorm
+    while [[ ! $answer =~ [Yy][Ee]?[Ss]? ]]; do
+	read -p 'The existing files will be deleted. Do you want to continue anyway (Yes|No)? ' answer
+	if [[ $answer =~ [Nn][Oo]? ]]; then echo ''; exit 0; fi
+    done; tput civis
+    delete_existing_files
 fi
 
 check_os
 nmap_scan
+if [[ ${#tcp_ports[*]} -eq 0 ]]; then
+    echo -e "\n${yellowColour}Nothing else to scan... exiting...${endColour}\n"
+    tput cnorm; exit 0
+fi
 scan_ports
+
+if [[ $nmap_pid ]]; then parse_nmap_results; fi
 
 echo -e "\n${blueColour}Waiting for all the child processes...${endColour}"; wait
 echo -e "\n${greenColour}Enjoy the results ;)${endColour}\n"

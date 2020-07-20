@@ -4,6 +4,7 @@
 # Output files
 nmap-output
 ldap-dump
+users.txt
 
 # Output folders
 smb_loot/
