@@ -18,13 +18,13 @@ declare -r users_file="users.txt"
 declare -r smb_folder="smb_loot"
 declare -r ftp_folder="ftp_loot"
 
-declare -i download_files=0
-
-declare -i nmap_pid
-
 declare -a tcp_ports=()
 declare -a domains=()
+declare -a local_domain=()
 declare -a users=()
+
+declare -i nmap_pid
+declare -i download_files=0
 
 declare target=""
 declare username=""
@@ -120,16 +120,15 @@ function nmap_scan {
 	echo -e "\n${turquoiseColour}Nmap complete scan in background, check the results in the file '$nmap_file'...${endColour}"
 	nmap -Pn -sV --script "default or (vuln and safe)" -p$(echo "${tcp_ports[*]}" | tr ' ' ',') -oN $nmap_file $target > /dev/null 2>&1 &
 	nmap_pid=$!
-	return 0
     else
-	echo -e "${redColour}[!] No open ports!${endColour}"; return 1
+	echo -e "${redColour}[!] No open ports!${endColour}"
     fi
 }
 
 function parse_nmap_results {
     if [[ $nmap_pid ]]; then
-	echo -e "\n${blueColour}Waiting for complete nmap scan to finish...${endColour}"; wait $nmap_pid; unset nmap_pid
-    fi; cat $nmap_file;
+	echo -e "\n${turquoiseColour}Waiting for complete nmap scan to finish...${endColour}"; wait $nmap_pid; unset nmap_pid
+    fi;
 
     domains+=($(grep -ioP '(commonName|Domain)[=:]\s*\w+\.\w+' $nmap_file | \
 	while read line; do echo $line | awk -F'[=:]' '{print $NF}'; done | tr -d '[:blank:]' | sort -u | xargs))
@@ -152,11 +151,13 @@ function scan_ports {
     if (echo "$ports" | grep -P ' (139|445) ' > /dev/null); then scan_smb; fi
     if (echo "$ports" | grep -P ' (80|443) ' > /dev/null); then scan_http; fi
     if (echo "$ports" | grep -P ' (21) ' > /dev/null); then scan_ftp; fi
-    
-    if [[ ${#domains[*]} -eq 0 ]]; then parse_nmap_results; fi
-    if (echo "$ports" | grep -P ' (53) ' > /dev/null); then scan_dns; fi
     if (echo "$ports" | grep -P ' (389|636|3268|3269) ' > /dev/null); then scan_ldap; fi
+
+    if [[ -z $local_domain && ${#domains[*]} -eq 0 && $nmap_pid ]]; then parse_nmap_results; fi
     if (echo "$ports" | grep -P ' (88) ' > /dev/null); then scan_kerberos; fi
+
+    if [[ $nmap_pid ]]; then parse_nmap_results; fi
+    if (echo "$ports" | grep -P ' (53) ' > /dev/null); then scan_dns; fi
 }
 
 function scan_ftp {
@@ -203,16 +204,17 @@ function scan_msrpc {
 	declare output=""
 	declare -a admins=()
 	declare -a nodescription=()
+	declare credentials="${username}%${password}"
 
-	output=$(rpcclient -U '' -N $target -c 'enumdomusers' 2>/dev/null)
-	if [[ $? -eq 0 ]]; then
+	if (rpcclient -U $credentials $target -c 'quit' 2>/dev/null); then
+	    output=$(rpcclient -U $credentials $target -c 'enumdomusers' 2>/dev/null)
 	    users+=($(echo $output | grep -ioP '\[.*?\]' | grep -iv '0x' | tr -d '[]' | xargs))
 	    users=($(echo ${users[*]} | tr ' ' '\n' | sort -u | xargs))
 	    echo "${users[*]}" | tr ' ' '\n' > $users_file
 	    
 	    echo "Users with description:"
 	    for user in ${users[*]}; do
-		output=$(rpcclient -U '' -N $target -c  "queryuser $user")
+		output=$(rpcclient -U $credentials $target -c  "queryuser $user")
 		if (echo "$output" | grep -iP '^\s*Description\s*:\s*$' > /dev/null); then
 		    nodescription+=($user)
 		else
@@ -221,11 +223,11 @@ function scan_msrpc {
 	    done
 	    echo "Users without description: ${nodescription[*]}"
 
-	    rpcclient -U '' -N $target -c 'enumdomgroups' | grep -i 'Admin' | while read group_line; do
+	    rpcclient -U $credentials $target -c 'enumdomgroups' | grep -i 'Admin' | while read group_line; do
 		echo -en "\nUsers in group '$(echo $group_line | grep -ioP '\[.*?\]' | head -n1 | tr -d '[]')': "
-		rpcclient -U '' -N $target -c "querygroupmem $(echo $group_line | grep -ioP '0x[0-9a-f]+')" | while read user_line; do
+		rpcclient -U $credentials $target -c "querygroupmem $(echo $group_line | grep -ioP '0x[0-9a-f]+')" | while read user_line; do
 		    rid=$(echo "$user_line" | grep -ioP '0x[0-9a-f]+' | head -n1 )
-		    output=$(rpcclient -U '' -N $target -c "queryuser $rid") 
+		    output=$(rpcclient -U $credentials $target -c "queryuser $rid") 
 		    if (echo "$output" | grep -i 'User Name' > /dev/null); then
 			echo -n "$(echo "$output" | grep -i 'User Name' | cut -d: -f2 | xargs) "
 		    else
@@ -233,6 +235,10 @@ function scan_msrpc {
 		    fi
 		done
 	    done; echo ''
+
+	    if [[ -z $local_domain ]]; then
+		local_domain=$(rpcclient -U $credentials $target -c "enumdomains" 2>/dev/null | grep -oP '\[.*?\]' | head -n1 | tr -d '[]')
+	    fi; echo -e "Local domain: $local_domain"
 	else
 	    echo -e "${yellowColour}Cannont connect to MSRPC with user '$username' and password '$password'${endColour}"
 	fi
@@ -244,14 +250,17 @@ function scan_smb {
     if (check_dependencies crackmapexec smbclient); then
 	declare output=$(crackmapexec smb $target -u "$username" -p "$password" --shares 2>/dev/null | grep -iv 'KTHXBYE' | \
 	    sed -r "s/[[:cntrl:]]\[[0-9]{1,3}m//g" | tee /dev/tty)
+	if [[ -z $local_domain ]]; then local_domain=$(echo "$output" | grep -ioP 'domain:\w+' | cut -d: -f2); fi
 
-	if (echo $output | grep -i 'Enumerating shares' > /dev/null && [[ $download_files -gt 0 ]]); then
-	    mkdir -p $smb_folder
-	    echo -en "\n${turquoiseColour}Downloading SMB shares to folder '$smb_folder':${endColour}"
-	    echo "$output" | tail +5 | grep READ | awk '{print $4}' | while read share; do
-		smbclient -U '' --no-pass //$target/$share -Tc $smb_folder/${share}_files.tar > /dev/null 2>&1
-		echo -n " $share"
-	    done; echo ''
+	if (echo "$output" | grep -i 'Enumerating shares' > /dev/null); then
+	    if [[ $download_files -gt 0 ]]; then
+		mkdir -p $smb_folder
+		echo -en "\n${turquoiseColour}Downloading SMB shares to folder '$smb_folder':${endColour}"
+		echo "$output" | tail +5 | grep READ | awk '{print $4}' | while read share; do
+		    smbclient -U '' --no-pass //$target/$share -Tc $smb_folder/${share}_files.tar > /dev/null 2>&1
+		    echo -n " $share"
+		done; echo ''
+	    fi
 	else
 	    echo -e "${yellowColour}Cannot connect to SMB with user '$username' and password '$password'${endColour}"
 	fi
@@ -261,12 +270,10 @@ function scan_smb {
 function scan_ldap {
     echo -e "\n${blueColour}Scanning LDAP service...${endColour}"
     if (check_dependencies ldapsearch); then
-	cat /dev/null > $ldap_file
-	for domain in ${domains[*]}; do
-	    ldapsearch -x -h $target -D "$username" -w "$password" -b "$(echo $domain | awk -F. '{print "DC="$1",DC="$2}')" >> $ldap_file
-	    echo -e "\n" >> $ldap_file
-	done
+	declare domain=$(ldapsearch -LLL -x -H ldap://$target -b '' -s base '(objectclass=*)' | grep -i 'ldapServiceName' | cut -d: -f2 | xargs)
+	domains=($(echo "${domains[*]} $domain" | tr ' ' '\n' | sort -u | xargs))
 
+	ldapsearch -x -h $target -D "$username" -w "$password" -b "$(echo $domain | awk -F. '{print "DC="$1",DC="$2}')" > $ldap_file
 	echo -e "${turquoiseColour}LDAP data dumped into file '$ldap_file'. Suspicious lines found:${endColour}"
 	grep -iP '(userpas|pwd|password|secret)\w*:' $ldap_file | grep -viP '(LastSet|Count|Age|Length|Propert|History|Time)\w*:'
     fi
@@ -275,15 +282,19 @@ function scan_ldap {
 function scan_kerberos {
     echo -e "\n${blueColour}Scanning Kerberous...${endColour}"
     if (check_dependencies GetNPUsers.py); then
+	declare domain="$local_domain"; if [[ -z $domain ]]; then domain=$(echo "${domains[0]}" | cut -d. -f1); fi
 	declare credentials="$username"; if [[ -n $password ]]; then credentials="$credentials:$password"; fi
 
-	for domain in ${domains[*]}; do
+	if [[ -n $domain ]]; then
 	    if [[ -e $users_file ]]; then
-		GetNPUsers.py -request -usersfile $users_file -dc-ip $target $domain/$credentials | tail -n +3 | grep -v '\[-\]'
-	    else 
-		GetNPUsers.py -dc-ip $target $domain/$credentials | tail -n +3 | grep -av '[\[-\]]'
+		GetNPUsers.py -request -usersfile $users_file -dc-ip $target $domain/$credentials
+	    else
+		echo -e "${yellowColour}No users file available...${endColour}"
+		GetNPUsers.py -dc-ip $target $domain/$credentials
 	    fi
-	done
+	else
+	    echo -e "${yellowColour}No domain found so far, so kerberos service cannot be analyzed...${endColour}"
+	fi
     fi
 }
 
@@ -335,7 +346,9 @@ fi
 scan_ports
 
 if [[ $nmap_pid ]]; then parse_nmap_results; fi
+echo -e "\n${blueColour}This is the Nmap complete scan output:${endColour}"
+cat $nmap_file
 
-echo -e "\n${blueColour}Waiting for all the child processes...${endColour}"; wait
+echo -e "\n${turquoiseColour}Waiting for all the child processes...${endColour}"; wait
 echo -e "\n${greenColour}Enjoy the results ;)${endColour}\n"
 tput cnorm
