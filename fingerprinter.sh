@@ -180,9 +180,11 @@ function scan_ftp {
 function scan_dns {
     echo -en "\n${blueColour}Scanning Domain Name Server...${endColour}"
     if (check_dependencies dig); then
-	dig axfr @$target
+	declare output=$(dig axfr @$target | head -n -5 | tail -n +5);
+	if [[ -n $output ]]; then echo -e "\n$output"; fi
 	for domain in ${domains[*]}; do
-	    dig axfr @$target $domain
+	    output=$(dig axfr @$target $domain | head -n -5 | tail -n +5)
+	    if [[ -n $output ]]; then echo -e "\n$output"; fi
 	done
     fi
 }
@@ -194,7 +196,7 @@ function scan_http {
     fi
 
     echo -e "\n${turquoiseColour}Bruteforce with http-enum.nse script...${endColour}"
-    nmap --script http-enum -p80 $target
+    nmap --script http-enum -p80 $target | head -n -2 | tail -n +6
 }
 
 function scan_msrpc {
@@ -238,7 +240,7 @@ function scan_msrpc {
 
 	    if [[ -z $local_domain ]]; then
 		local_domain=$(rpcclient -U $credentials $target -c "enumdomains" 2>/dev/null | grep -oP '\[.*?\]' | head -n1 | tr -d '[]')
-	    fi; echo -e "Local domain: $local_domain"
+	    fi; echo -e "\nLocal domain: $local_domain"
 	else
 	    echo -e "${yellowColour}Cannont connect to MSRPC with user '$username' and password '$password'${endColour}"
 	fi
@@ -280,17 +282,17 @@ function scan_ldap {
 }
 
 function scan_kerberos {
-    echo -e "\n${blueColour}Scanning Kerberous...${endColour}"
+    echo -e "\n${blueColour}Scanning Kerberos...${endColour}"
     if (check_dependencies GetNPUsers.py); then
 	declare domain="$local_domain"; if [[ -z $domain ]]; then domain=$(echo "${domains[0]}" | cut -d. -f1); fi
 	declare credentials="$username"; if [[ -n $password ]]; then credentials="$credentials:$password"; fi
 
 	if [[ -n $domain ]]; then
 	    if [[ -e $users_file ]]; then
-		GetNPUsers.py -request -usersfile $users_file -dc-ip $target $domain/$credentials
+		GetNPUsers.py -request -usersfile $users_file -dc-ip $target $domain/$credentials | tail -n +3
 	    else
 		echo -e "${yellowColour}No users file available...${endColour}"
-		GetNPUsers.py -dc-ip $target $domain/$credentials
+		GetNPUsers.py -dc-ip $target $domain/$credentials | tail -n +3
 	    fi
 	else
 	    echo -e "${yellowColour}No domain found so far, so kerberos service cannot be analyzed...${endColour}"
@@ -347,7 +349,7 @@ scan_ports
 
 if [[ $nmap_pid ]]; then parse_nmap_results; fi
 echo -e "\n${blueColour}This is the Nmap complete scan output:${endColour}"
-cat $nmap_file
+head -n -3 $nmap_file | tail -n +5
 
 echo -e "\n${turquoiseColour}Waiting for all the child processes...${endColour}"; wait
 echo -e "\n${greenColour}Enjoy the results ;)${endColour}\n"
