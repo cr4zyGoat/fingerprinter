@@ -6,7 +6,7 @@
  | |    | | | | | (_| |  __/ |  | |_) | |  | | | | | ||  __/ |   
  |_|    |_|_| |_|\__, |\___|_|  | .__/|_|  |_|_| |_|\__\___|_|   
                   __/ |         | |                              
-                 |___/          |_|          BY CR4ZYGOAT        							
+                 |___/          |_|          BY CR4ZYGOAT
 ```
 
 # Introduction
@@ -17,7 +17,7 @@ The most similar tool I found is [autorecon](https://github.com/Tib3rius/AutoRec
 **Use this tool always with the proper authorization of the client. I'm not responsible for the misuse of this tool. I tested the different services and scenarios against virtual machines from the platform *HackTheBox*, which were already retired and rooted. Also, the images and information used in this README file correspond to these machines.**
 
 # Requirements
-This tool just need to things to run:
+This tool just need two things to run:
 
 - Bash terminal
 - Nmap scanning tool
@@ -27,17 +27,23 @@ Of course, this tool uses many other tools to analyze the different services, bu
 No root privileges needed for any check, so execute this tool as a normal user.
 
 # Command line options
-By default, this tools doesn't realize any intrusive action, neither download files nor try to login. However, could be executed with the following arguments:
+By default, this tool doesn't make any intrusive action, neither download files nor try to login. However, could be executed with the following arguments:
 
 ```
 Usage: ./fingerprinter.sh [options] target
     Required arguments:
         target                      Address of the target to scan
+
     Optional arguments:
         -d, --domain                Domain name
         -u, --username              Username (Default: blank)
         -p, --password              Password (Default: blank)
         -f, --download-files        Download files from target (Default: no)
+
+    Usage examples:
+        ./fingerprinter.sh 127.0.0.1
+        ./fingerprinter.sh -u user -p pass 127.0.0.1
+        ./fingerprinter.sh -f 127.0.0.1
 ```
 
 # Scans & checks

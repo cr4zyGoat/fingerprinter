@@ -31,16 +31,22 @@ declare username=""
 declare password=""
 
 
-# Function
+# Functions
 function help {
     echo -e "\n${yellowColour}Usage: $0 [options] target
     Required arguments:
 	target			    Address of the target to scan
+
     Optional arguments:
 	-d, --domain		    Domain name
 	-u, --username		    Username (Default: blank)
 	-p, --password		    Password (Default: blank)
 	-f, --download-files	    Download files from target (Default: no)
+
+    Usage examples:
+	$0 127.0.0.1
+	$0 -u user -p pass 127.0.0.1
+	$0 -f 127.0.0.1
     ${endColour}"
     exit 1
 }
@@ -127,7 +133,8 @@ function nmap_scan {
 
 function parse_nmap_results {
     if [[ $nmap_pid ]]; then
-	echo -e "\n${turquoiseColour}Waiting for complete nmap scan to finish...${endColour}"; wait $nmap_pid; unset nmap_pid
+	echo -e "\n${turquoiseColour}Waiting for complete nmap scan to finish...${endColour}"
+	wait $nmap_pid; unset nmap_pid
     fi;
 
     domains+=($(grep -ioP '(commonName|Domain)[=:]\s*\w+\.\w+' $nmap_file | \
